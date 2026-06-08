@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import struct
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -195,6 +197,39 @@ def _heading_degrees(data: dict[str, Any]) -> float | None:
     if not isinstance(yaw, (int, float)):
         return None
     return round(yaw % 360, 1)
+
+
+_CURPATH_MAGIC = b"\x16\x01\x03\x05"
+_CURPATH_HEADER_LEN = 22
+_CURPATH_RECORD_LEN = 5
+_CURPATH_MAX_POINTS = 2000
+
+
+def _decode_curpath(data: dict[str, Any]) -> list[list[int]]:
+    """Decode the base64 ``curpath`` blob into a list of ``[x, y]`` points.
+
+    Format (reverse-engineered from live Genie 600/1000 data): a 22-byte header
+    (magic ``16 01 03 05``, point count as uint32 LE at offset 4) followed by
+    that many 5-byte records of ``int16 x, int16 y`` (little-endian, in the same
+    millimetre frame as zone ``vertexs``) plus a trailing 1-byte flag.
+    """
+    blob = data.get("curpath")
+    if not isinstance(blob, str) or not blob:
+        return []
+    try:
+        raw = base64.b64decode(blob)
+    except (ValueError, TypeError):
+        return []
+    if len(raw) < _CURPATH_HEADER_LEN + _CURPATH_RECORD_LEN or raw[:4] != _CURPATH_MAGIC:
+        return []
+    count = struct.unpack_from("<I", raw, 4)[0]
+    body = raw[_CURPATH_HEADER_LEN:]
+    usable = min(count, len(body) // _CURPATH_RECORD_LEN, _CURPATH_MAX_POINTS)
+    points: list[list[int]] = []
+    for i in range(usable):
+        x, y = struct.unpack_from("<hh", body, i * _CURPATH_RECORD_LEN)
+        points.append([x, y])
+    return points
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -461,6 +496,13 @@ SENSORS: tuple[AnthbotSensorDescription, ...] = (
         icon="mdi:crosshairs-gps",
         value_fn=_position_summary,
     ),
+    AnthbotSensorDescription(
+        key="coverage_trail",
+        translation_key="coverage_trail",
+        name="Coverage trail",
+        icon="mdi:map-marker-path",
+        value_fn=lambda data: len(_decode_curpath(data)) or None,
+    ),
 )
 
 
@@ -475,6 +517,7 @@ def _sensor_path_for_description(description: AnthbotSensorDescription) -> list[
         "firmware_version": ["fw_version", "system_version"],
         "mow_count": ["param_set", "mow_count"],
         "position": ["pose", "x"],
+        "coverage_trail": ["curpath"],
         "mode": ["mode", "value"],
         "error_code": ["err_code"],
         "ip_address": ["sta_ip_addr"],
@@ -673,4 +716,8 @@ class AnthbotSensorEntity(
             attributes["y"] = pose.get("y")
             attributes["heading"] = _heading_degrees(state)
             attributes["yaw_raw"] = pose.get("yaw")
+        if self.entity_description.key == "coverage_trail":
+            points = _decode_curpath(state)
+            attributes["points"] = points
+            attributes["point_count"] = len(points)
         return attributes

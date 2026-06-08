@@ -54,6 +54,7 @@ From `state.reported` it exposes:
 - `sensor.<device>_zones` for discovered manual zones
 - `sensor.<device>_auto_zones` for discovered auto-zones
 - `sensor.<device>_position` from `pose` (live position; `x`/`y` attributes are in millimetres, in the same coordinate frame as zone `vertexs`, plus a `heading` attribute in degrees)
+- `sensor.<device>_coverage_trail` decoded from the `curpath` blob; the state is the point count and the `points` attribute is a list of `[x, y]` millimetre coordinates (same frame as zone `vertexs`)
 - `binary_sensor.<device>_connection` from `online`
 - `binary_sensor.<device>_charging` from `robot_sta.value` or `mode.value`
 - `switch.<device>_custom_mowing_direction_enabled` to toggle `param_set.enable_adaptive_head`
