@@ -490,7 +490,7 @@ def _sensor_path_for_description(description: AnthbotSensorDescription) -> list[
         "mow_count": ["param_set", "mow_count"],
         "position": ["pose", "x"],
         "coverage_trail": ["curpath"],
-        "yard_map": ["curpath"],
+        "yard_map": ["has_map"],
         "mode": ["mode", "value"],
         "error_code": ["err_code"],
         "ip_address": ["sta_ip_addr"],
