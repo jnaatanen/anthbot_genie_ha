@@ -468,6 +468,13 @@ SENSORS: tuple[AnthbotSensorDescription, ...] = (
         icon="mdi:map-marker-path",
         value_fn=lambda data: len(data.get("_coverage_trail") or []) or None,
     ),
+    AnthbotSensorDescription(
+        key="yard_map",
+        translation_key="yard_map",
+        name="Yard map",
+        icon="mdi:map",
+        value_fn=lambda data: len(data.get("_yard_map_points") or []) or None,
+    ),
 )
 
 
@@ -483,6 +490,7 @@ def _sensor_path_for_description(description: AnthbotSensorDescription) -> list[
         "mow_count": ["param_set", "mow_count"],
         "position": ["pose", "x"],
         "coverage_trail": ["curpath"],
+        "yard_map": ["curpath"],
         "mode": ["mode", "value"],
         "error_code": ["err_code"],
         "ip_address": ["sta_ip_addr"],
@@ -685,4 +693,11 @@ class AnthbotSensorEntity(
             points = state.get("_coverage_trail") or []
             attributes["points"] = points
             attributes["point_count"] = len(points)
+        if self.entity_description.key == "yard_map":
+            points = state.get("_yard_map_points") or []
+            attributes["points"] = points
+            attributes["point_count"] = len(points)
+            boundary = state.get("_yard_map_boundary")
+            if boundary:
+                attributes["boundary"] = boundary
         return attributes

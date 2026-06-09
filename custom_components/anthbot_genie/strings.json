@@ -105,6 +105,9 @@
       },
       "coverage_trail": {
         "name": "Coverage trail"
+      },
+      "yard_map": {
+        "name": "Yard map"
       }
     },
     "binary_sensor": {
