@@ -116,15 +116,58 @@ def _simplify_collinear(points: list[list[int]]) -> list[list[int]]:
     return out
 
 
-def _grid_boundary(cells: set[tuple[int, int]]) -> list[list[int]] | None:
-    """Trace the outer boundary polygon of a set of occupied grid cells.
+_YARD_BOUNDARY_MAX_DILATE = 8  # bridge gaps up to ~1.6 m to merge sparse fragments
 
-    Each occupied cell contributes the edges it shares with empty neighbours;
-    those directed edges are chained into closed loops and the longest loop is
-    returned as a millimetre polygon (with collinear vertices simplified).
-    """
-    if len(cells) < 8:
+
+def _convex_hull(points: list[list[int]]) -> list[list[int]] | None:
+    """Convex hull (monotone chain) of points in mm; always encloses every point."""
+    pts = sorted({(int(p[0]), int(p[1])) for p in points})
+    if len(pts) < 3:
         return None
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower: list[tuple[int, int]] = []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    upper: list[tuple[int, int]] = []
+    for p in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    hull = lower[:-1] + upper[:-1]
+    return [[x, y] for x, y in hull] if len(hull) >= 3 else None
+
+
+def _cells_single_component(cells: set[tuple[int, int]]) -> bool:
+    """Whether the occupied cells form a single 4-connected component."""
+    if not cells:
+        return False
+    start = next(iter(cells))
+    seen = {start}
+    stack = [start]
+    while stack:
+        cx, cy = stack.pop()
+        for nb in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
+            if nb in cells and nb not in seen:
+                seen.add(nb)
+                stack.append(nb)
+    return len(seen) == len(cells)
+
+
+def _dilate_cells(cells: set[tuple[int, int]]) -> set[tuple[int, int]]:
+    """One-cell morphological dilation (add the 4-neighbours of every cell)."""
+    out = set(cells)
+    for cx, cy in cells:
+        out.update(((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)))
+    return out
+
+
+def _trace_outer_loop(cells: set[tuple[int, int]]) -> list[list[int]]:
+    """Trace the longest boundary loop of occupied grid cells, as mm vertices."""
     g = _YARD_GRID_MM
     edges: dict[tuple[int, int], tuple[int, int]] = {}
     for (cx, cy) in cells:
@@ -140,8 +183,6 @@ def _grid_boundary(cells: set[tuple[int, int]]) -> list[list[int]] | None:
             edges[br] = bl
         if (cx - 1, cy) not in cells:
             edges[bl] = tl
-    if not edges:
-        return None
     best: list[list[int]] = []
     visited: set[tuple[int, int]] = set()
     for start in list(edges):
@@ -155,8 +196,35 @@ def _grid_boundary(cells: set[tuple[int, int]]) -> list[list[int]] | None:
             cur = edges[cur]
         if len(loop) > len(best):
             best = loop
-    simplified = _simplify_collinear(best)
-    return simplified or None
+    return best
+
+
+def _grid_boundary(cells: set[tuple[int, int]]) -> list[list[int]] | None:
+    """Outline polygon enclosing ALL occupied cells, in millimetres.
+
+    The path is sampled sparsely (a short window per poll), so the occupied
+    cells usually form several disconnected fragments. Tracing the grid directly
+    would return only the largest fragment — correct shape but several times too
+    small. Instead, morphologically dilate the cells until they form a single
+    connected region, then trace that region's outer loop: this keeps the
+    concave grid shape while enclosing everything. If the fragments are too far
+    apart to bridge within the cap, fall back to a convex hull of all cells
+    (which always encloses every point).
+    """
+    if len(cells) < 8:
+        return None
+    g = _YARD_GRID_MM
+    work = set(cells)
+    dilations = 0
+    while not _cells_single_component(work) and dilations < _YARD_BOUNDARY_MAX_DILATE:
+        work = _dilate_cells(work)
+        dilations += 1
+    if not _cells_single_component(work):
+        return _convex_hull([[cx * g + g // 2, cy * g + g // 2] for cx, cy in cells])
+    simplified = _simplify_collinear(_trace_outer_loop(work))
+    if simplified:
+        return simplified
+    return _convex_hull([[cx * g + g // 2, cy * g + g // 2] for cx, cy in cells])
 
 
 class AnthbotGenieDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
