@@ -149,6 +149,9 @@
       "return_to_dock": {
         "name": "Return to dock"
       },
+      "reset_yard_map": {
+        "name": "Reset yard map"
+      },
       "zone": {
         "name": "Zone {zone_name}"
       },

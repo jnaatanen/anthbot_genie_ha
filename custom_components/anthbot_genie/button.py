@@ -8,6 +8,7 @@ from typing import Any
 
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -38,6 +39,13 @@ BUTTONS: tuple[AnthbotButtonDescription, ...] = (
         key="return_to_dock",
         translation_key="return_to_dock",
         name="Return to dock",
+    ),
+    AnthbotButtonDescription(
+        key="reset_yard_map",
+        translation_key="reset_yard_map",
+        name="Reset yard map",
+        icon="mdi:map-marker-remove",
+        entity_category=EntityCategory.CONFIG,
     ),
 )
 
@@ -116,6 +124,9 @@ class AnthbotButtonEntity(
     async def async_press(self) -> None:
         """Run the button action."""
         key = self.entity_description.key
+        if key == "reset_yard_map":
+            await self.coordinator.async_reset_yard_map()
+            return
         if key == "start_full_mow":
             await self.coordinator.client.async_publish_service_command(
                 cmd="app_state", data=1
