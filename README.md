@@ -188,6 +188,7 @@ The integration also creates control entities on each mower device page:
 
 - Lawn mower: `lawn_mower.<device>` with the standard `start_mowing`, `pause`, and `dock` actions
 - Buttons: `Start full mow`, `Stop mow`, `Return to dock`
+- Button: `Reset yard map` (config) — manually clears the persistent `yard_map` (a backup of the cleared map is kept in storage). The yard map otherwise only resets on a confirmed device re-map (a changed `multi_maps` map_id that persists for several polls), never on a zone edit.
 - Buttons: one `Zone <name>` per manual zone
 - Buttons: one `Auto zone <name>` per auto-zone
 - Number controls (sliders): `Mow height`, `Voice volume`

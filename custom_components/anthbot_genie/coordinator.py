@@ -40,6 +40,7 @@ _YARD_GRID_MM = 200  # dedup grid cell size in millimetres
 _YARD_MAX_CELLS = 5000
 _YARD_SAVE_DELAY = 30  # seconds to batch Store writes
 _YARD_STORE_VERSION = 1
+_YARD_REMAP_CONFIRM_POLLS = 3  # a new map_id must persist this many polls before reset
 
 
 def _decode_curpath_mm(blob: Any) -> list[list[int]]:
@@ -79,12 +80,15 @@ def _raw_robot_status(data: dict[str, Any]) -> str | None:
     return None
 
 
-def _map_identity(data: dict[str, Any]) -> str | None:
-    """Return a stable identifier for the device's current map.
+def _device_map_id(data: dict[str, Any]) -> str | None:
+    """Return the device's real map id, or None if it does not report one.
 
-    Prefers ``multi_maps.map_list[0].map_id``; falls back to the map version
-    timestamps when that is absent (e.g. some Genie firmwares report an empty
-    ``multi_maps``). Used only to detect a re-map (which resets the yard map).
+    ONLY ``multi_maps.map_list[0].map_id`` is trusted as a map identity. The
+    timestamp fields (``map_time`` / ``map_tar_time`` / ``area_time``) are NOT
+    used: ``area_time`` provably changes on a plain zone edit (no re-map), and
+    mixing sources made the persistent yard map reset spuriously. When the
+    device reports no real ``map_id``, this returns None and the yard map is
+    NEVER auto-reset (it only grows; use the manual reset button to clear it).
     """
     multi = data.get("multi_maps")
     if isinstance(multi, dict):
@@ -93,10 +97,6 @@ def _map_identity(data: dict[str, Any]) -> str | None:
             map_id = map_list[0].get("map_id")
             if isinstance(map_id, str) and map_id:
                 return map_id
-    for key in ("map_time", "map_tar_time", "area_time"):
-        value = data.get(key)
-        if isinstance(value, str) and value:
-            return value
     return None
 
 
@@ -259,6 +259,9 @@ class AnthbotGenieDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._yard_cells: dict[tuple[int, int], list[int]] = {}
         self._yard_map_id: str | None = None
         self._yard_loaded = False
+        self._yard_backup: dict[str, Any] | None = None
+        self._yard_pending_map_id: str | None = None
+        self._yard_pending_count = 0
 
     @property
     def reported_state(self) -> dict[str, Any]:
@@ -354,6 +357,8 @@ class AnthbotGenieDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if isinstance(stored, dict):
             map_id = stored.get("map_id")
             self._yard_map_id = map_id if isinstance(map_id, str) else None
+            backup = stored.get("backup")
+            self._yard_backup = backup if isinstance(backup, dict) else None
             for point in stored.get("points") or []:
                 if (
                     isinstance(point, list)
@@ -365,32 +370,60 @@ class AnthbotGenieDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _yard_map_data(self) -> dict[str, Any]:
         """Serialise the yard map for the Store."""
-        return {
+        data: dict[str, Any] = {
             "map_id": self._yard_map_id,
             "points": list(self._yard_cells.values()),
         }
+        if self._yard_backup is not None:
+            data["backup"] = self._yard_backup
+        return data
 
     def _accumulate_yard_map(self, property_state: dict[str, Any]) -> None:
         """Accumulate a permanent, cross-session yard map.
 
         Unlike the session coverage trail this is NOT reset when a mow ends or
-        the mower docks; it only resets when the device's map identity changes
-        (a re-map). Points are deduped onto a coarse grid, capped, and persisted
-        to disk so the map keeps filling in 24/7 and survives restarts.
+        the mower docks. It is auto-reset ONLY when the device reports a real
+        ``map_id`` that genuinely differs from the stored one and stays changed
+        for several consecutive polls (debounced), to avoid wiping the map on a
+        transient reading. When the device reports no ``map_id`` at all, the map
+        is never auto-reset (use the manual reset button). Points are deduped
+        onto a coarse grid, capped, and persisted so the map fills in 24/7.
         """
-        map_id = _map_identity(property_state)
+        map_id = _device_map_id(property_state)
         changed = False
-        if (
-            map_id is not None
-            and self._yard_map_id is not None
-            and map_id != self._yard_map_id
-        ):
-            # The device map was replaced -> start a fresh yard map.
-            self._yard_cells = {}
-            changed = True
-        if map_id is not None and map_id != self._yard_map_id:
-            self._yard_map_id = map_id
-            changed = True
+        if map_id is not None:
+            if self._yard_map_id is None:
+                # First time we learn a real map id -> adopt it, do NOT reset.
+                self._yard_map_id = map_id
+                self._yard_pending_map_id = None
+                self._yard_pending_count = 0
+                changed = True
+            elif map_id == self._yard_map_id:
+                # Same map -> clear any pending re-map candidate.
+                self._yard_pending_map_id = None
+                self._yard_pending_count = 0
+            else:
+                # A different real map id -> candidate re-map; require it to be
+                # stable for several polls before wiping (debounce).
+                if map_id == self._yard_pending_map_id:
+                    self._yard_pending_count += 1
+                else:
+                    self._yard_pending_map_id = map_id
+                    self._yard_pending_count = 1
+                if self._yard_pending_count >= _YARD_REMAP_CONFIRM_POLLS:
+                    # Confirmed re-map: back up the old map, then start fresh.
+                    if self._yard_cells:
+                        self._yard_backup = {
+                            "map_id": self._yard_map_id,
+                            "points": list(self._yard_cells.values()),
+                        }
+                    self._yard_cells = {}
+                    self._yard_map_id = map_id
+                    self._yard_pending_map_id = None
+                    self._yard_pending_count = 0
+                    changed = True
+        # When map_id is None this poll, the identity is left untouched and the
+        # map is never reset.
 
         if _raw_robot_status(property_state) in _MOWING_STATES:
             points = _decode_curpath_mm(property_state.get("curpath"))
@@ -409,3 +442,18 @@ class AnthbotGenieDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         if changed:
             self._yard_store.async_delay_save(self._yard_map_data, _YARD_SAVE_DELAY)
+
+    async def async_reset_yard_map(self) -> None:
+        """Manually clear the persistent yard map, keeping a backup for recovery."""
+        if not self._yard_loaded:
+            await self._async_load_yard_map()
+        if self._yard_cells:
+            self._yard_backup = {
+                "map_id": self._yard_map_id,
+                "points": list(self._yard_cells.values()),
+            }
+        self._yard_cells = {}
+        self._yard_pending_map_id = None
+        self._yard_pending_count = 0
+        await self._yard_store.async_save(self._yard_map_data())
+        await self.async_request_refresh()
