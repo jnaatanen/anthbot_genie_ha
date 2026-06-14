@@ -36,8 +36,8 @@ _DOCK_RESET_STATES = {
 
 # Persistent yard map: a permanent, cross-session point cloud (deduped on a grid)
 # that survives restarts and only resets when the device's map identity changes.
-_YARD_GRID_MM = 200  # dedup grid cell size in millimetres
-_YARD_MAX_CELLS = 5000
+_YARD_GRID_MM = 250  # dedup grid cell size in millimetres
+_YARD_MAX_CELLS = 10000  # ~625 m² at the 250 mm grid; covers large yards
 _YARD_SAVE_DELAY = 30  # seconds to batch Store writes
 _YARD_STORE_VERSION = 1
 _YARD_REMAP_CONFIRM_POLLS = 3  # a new map_id must persist this many polls before reset
