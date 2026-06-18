@@ -116,46 +116,28 @@ def _simplify_collinear(points: list[list[int]]) -> list[list[int]]:
     return out
 
 
-_YARD_BOUNDARY_MAX_DILATE = 8  # bridge gaps up to ~1.6 m to merge sparse fragments
+_YARD_BOUNDARY_CLOSE_CELLS = 2  # light closing (~500 mm) to bridge within-region poll gaps
+_YARD_MIN_COMPONENT_CELLS = 12  # ignore coverage blobs smaller than this (noise)
 
 
-def _convex_hull(points: list[list[int]]) -> list[list[int]] | None:
-    """Convex hull (monotone chain) of points in mm; always encloses every point."""
-    pts = sorted({(int(p[0]), int(p[1])) for p in points})
-    if len(pts) < 3:
-        return None
-
-    def cross(o, a, b):
-        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
-
-    lower: list[tuple[int, int]] = []
-    for p in pts:
-        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
-            lower.pop()
-        lower.append(p)
-    upper: list[tuple[int, int]] = []
-    for p in reversed(pts):
-        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
-            upper.pop()
-        upper.append(p)
-    hull = lower[:-1] + upper[:-1]
-    return [[x, y] for x, y in hull] if len(hull) >= 3 else None
-
-
-def _cells_single_component(cells: set[tuple[int, int]]) -> bool:
-    """Whether the occupied cells form a single 4-connected component."""
-    if not cells:
-        return False
-    start = next(iter(cells))
-    seen = {start}
-    stack = [start]
-    while stack:
-        cx, cy = stack.pop()
-        for nb in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
-            if nb in cells and nb not in seen:
-                seen.add(nb)
-                stack.append(nb)
-    return len(seen) == len(cells)
+def _connected_components(cells: set[tuple[int, int]]) -> list[set[tuple[int, int]]]:
+    """Split occupied cells into 4-connected components."""
+    remaining = set(cells)
+    components: list[set[tuple[int, int]]] = []
+    while remaining:
+        start = next(iter(remaining))
+        comp = {start}
+        stack = [start]
+        remaining.discard(start)
+        while stack:
+            cx, cy = stack.pop()
+            for nb in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
+                if nb in remaining:
+                    remaining.discard(nb)
+                    comp.add(nb)
+                    stack.append(nb)
+        components.append(comp)
+    return components
 
 
 def _dilate_cells(cells: set[tuple[int, int]]) -> set[tuple[int, int]]:
@@ -199,32 +181,37 @@ def _trace_outer_loop(cells: set[tuple[int, int]]) -> list[list[int]]:
     return best
 
 
-def _grid_boundary(cells: set[tuple[int, int]]) -> list[list[int]] | None:
-    """Outline polygon enclosing ALL occupied cells, in millimetres.
+def _grid_boundaries(cells: set[tuple[int, int]]) -> list[list[list[int]]]:
+    """Outline polygons enclosing the occupied cells, in millimetres.
 
-    The path is sampled sparsely (a short window per poll), so the occupied
-    cells usually form several disconnected fragments. Tracing the grid directly
-    would return only the largest fragment — correct shape but several times too
-    small. Instead, morphologically dilate the cells until they form a single
-    connected region, then trace that region's outer loop: this keeps the
-    concave grid shape while enclosing everything. If the fragments are too far
-    apart to bridge within the cap, fall back to a convex hull of all cells
-    (which always encloses every point).
+    The path is sampled sparsely, so a continuously-mowed region can have small
+    gaps; a light morphological closing bridges those. But genuinely separate
+    parts of the lawn stay separate: each connected component is traced into its
+    OWN polygon, so distinct areas are never joined by a spurious bridge.
+    Components smaller than a noise threshold are dropped. Returned largest-first.
     """
-    if len(cells) < 8:
-        return None
-    g = _YARD_GRID_MM
+    cells = set(cells)
+    if len(cells) < _YARD_MIN_COMPONENT_CELLS:
+        return []
     work = set(cells)
-    dilations = 0
-    while not _cells_single_component(work) and dilations < _YARD_BOUNDARY_MAX_DILATE:
+    for _ in range(_YARD_BOUNDARY_CLOSE_CELLS):
         work = _dilate_cells(work)
-        dilations += 1
-    if not _cells_single_component(work):
-        return _convex_hull([[cx * g + g // 2, cy * g + g // 2] for cx, cy in cells])
-    simplified = _simplify_collinear(_trace_outer_loop(work))
-    if simplified:
-        return simplified
-    return _convex_hull([[cx * g + g // 2, cy * g + g // 2] for cx, cy in cells])
+    sized: list[tuple[int, list[list[int]]]] = []
+    for comp in _connected_components(work):
+        original = sum(1 for cell in comp if cell in cells)
+        if original < _YARD_MIN_COMPONENT_CELLS:
+            continue
+        loop = _simplify_collinear(_trace_outer_loop(comp))
+        if loop and len(loop) >= 3:
+            sized.append((original, loop))
+    sized.sort(key=lambda item: item[0], reverse=True)
+    return [poly for _, poly in sized]
+
+
+def _grid_boundary(cells: set[tuple[int, int]]) -> list[list[int]] | None:
+    """Largest single boundary polygon (backward-compatible single-polygon view)."""
+    polygons = _grid_boundaries(cells)
+    return polygons[0] if polygons else None
 
 
 class AnthbotGenieDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -317,8 +304,12 @@ class AnthbotGenieDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             merged_state["_service_reported"] = service_state
             merged_state["_area_definition"] = self._area_definition
             merged_state["_coverage_trail"] = list(self._coverage_points)
+            yard_boundaries = _grid_boundaries(set(self._yard_cells))
             merged_state["_yard_map_points"] = list(self._yard_cells.values())
-            merged_state["_yard_map_boundary"] = _grid_boundary(set(self._yard_cells))
+            merged_state["_yard_map_boundaries"] = yard_boundaries
+            merged_state["_yard_map_boundary"] = (
+                yard_boundaries[0] if yard_boundaries else None
+            )
             return merged_state
         except AnthbotGenieApiError as err:
             raise UpdateFailed(str(err)) from err
