@@ -700,4 +700,7 @@ class AnthbotSensorEntity(
             boundary = state.get("_yard_map_boundary")
             if boundary:
                 attributes["boundary"] = boundary
+            boundaries = state.get("_yard_map_boundaries")
+            if boundaries:
+                attributes["boundaries"] = boundaries
         return attributes
