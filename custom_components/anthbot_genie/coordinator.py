@@ -25,6 +25,11 @@ _CURPATH_HEADER_LEN = 22
 _CURPATH_RECORD_LEN = 5
 _CURPATH_SCALE = 10  # curpath is in centimetres; pose/zone vertexs are in millimetres
 _COVERAGE_MAX_POINTS = 5000
+# While the mower is idle/docked there is no live telemetry worth polling for, so
+# the coordinator falls back to this slow cadence to avoid hammering the AWS IoT
+# shadow endpoint (which returns HTTP 429 TOO_MANY_REQUESTS under frequent polls).
+# While actively mowing it uses the configured (fast) interval + keep-alive.
+_IDLE_SCAN_INTERVAL = timedelta(minutes=10)
 _MOWING_STATES = {
     "globalmowing", "zonemowing", "pointmowing",
     "bordermowing", "regionmowing", "nestmowing",
@@ -235,6 +240,11 @@ class AnthbotGenieDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.account_client = account_client
         self.client = client
         self.device = device
+        # Adaptive polling: the configured interval is the "active" (mowing)
+        # cadence; when idle we back off to at least _IDLE_SCAN_INTERVAL so we
+        # never poll the shadow endpoint more often than once every 10 min.
+        self._active_interval = update_interval
+        self._idle_interval = max(update_interval, _IDLE_SCAN_INTERVAL)
         self._area_definition: dict[str, Any] = {}
         self._last_area_time: str | None = None
         self._coverage_points: list[list[int]] = []
@@ -259,23 +269,42 @@ class AnthbotGenieDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Fetch the latest state from the cloud endpoint."""
         try:
             await self.client.async_ensure_temporary_credentials(self.account_client)
-            # Keep the device's real-time stream alive. The mower only streams
-            # live telemetry (pose/curpath) to the cloud shadow while a client
-            # signals an active app session; it stops roughly 60 s after the
-            # last signal. Re-sending it every poll keeps pose/curpath fresh in
-            # HA without the phone app open. Best-effort: never fail the update
-            # if the keep-alive command does not go through.
-            try:
-                await self.client.async_publish_service_command(
-                    cmd="app_state", data=1
-                )
-            except AnthbotGenieApiError as err:
-                self.logger.debug("Real-time keep-alive (app_state) failed: %s", err)
             property_state = await self.client.async_get_shadow_reported_state()
             try:
                 service_state = await self.client.async_get_service_reported_state()
             except AnthbotGenieApiError:
                 service_state = {}
+
+            # Adaptive polling. The mower only streams live telemetry
+            # (pose/curpath) to the shadow while a client signals an active app
+            # session, and that only matters while it is actually mowing. So:
+            #  - mowing  -> keep the stream alive (app_state) and poll at the
+            #    configured fast cadence, exactly as before;
+            #  - idle/docked -> send nothing and back off to the slow cadence
+            #    (>= 10 min), which keeps us under the shadow endpoint's rate
+            #    limit (it returns HTTP 429 TOO_MANY_REQUESTS under frequent polls).
+            is_mowing = _raw_robot_status(property_state) in _MOWING_STATES
+            if is_mowing:
+                # Best-effort: never fail the update if the keep-alive command
+                # does not go through.
+                try:
+                    await self.client.async_publish_service_command(
+                        cmd="app_state", data=1
+                    )
+                except AnthbotGenieApiError as err:
+                    self.logger.debug(
+                        "Real-time keep-alive (app_state) failed: %s", err
+                    )
+            desired_interval = (
+                self._active_interval if is_mowing else self._idle_interval
+            )
+            if self.update_interval != desired_interval:
+                self.update_interval = desired_interval
+                self.logger.debug(
+                    "Anthbot poll interval -> %s (mowing=%s)",
+                    desired_interval,
+                    is_mowing,
+                )
 
             area_time = property_state.get("area_time")
             if not isinstance(area_time, str):

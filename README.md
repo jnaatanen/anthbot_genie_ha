@@ -26,11 +26,16 @@ Then it polls the AWS IoT device shadow endpoint per discovered `sn` using autom
 
 - `GET https://<iot_endpoint>/things/<sn>/shadow?name=property`
 
-On every poll the integration also sends an `app_state` keep-alive command. The
-mower only streams live telemetry (such as live position and path) to the cloud
-shadow while a client signals an active app session, and stops roughly 60 seconds
-after the last signal. Re-sending it each poll keeps that data fresh in Home
-Assistant without the phone app being open.
+Polling is adaptive to keep the integration under the shadow endpoint's rate
+limit (it returns HTTP 429 `TOO_MANY_REQUESTS` under frequent polls). While the
+mower is actively mowing, the integration polls at the configured (fast) interval
+and sends an `app_state` keep-alive command each poll — the mower only streams
+live telemetry (position/path) to the cloud shadow while a client signals an
+active app session, and stops roughly 60 seconds after the last signal, so
+re-sending it keeps that data fresh without the phone app being open. While the
+mower is idle or docked there is no live telemetry to fetch, so the integration
+sends no keep-alive and backs off to a slow cadence (at least once every 10
+minutes).
 
 It also fetches the mower area definition file from Anthbot cloud to discover:
 
