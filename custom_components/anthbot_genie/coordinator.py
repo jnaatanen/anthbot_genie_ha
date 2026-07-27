@@ -6,6 +6,7 @@ import base64
 from datetime import timedelta
 import logging
 import struct
+import time
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -30,6 +31,15 @@ _COVERAGE_MAX_POINTS = 5000
 # shadow endpoint (which returns HTTP 429 TOO_MANY_REQUESTS under frequent polls).
 # While actively mowing it uses the configured (fast) interval + keep-alive.
 _IDLE_SCAN_INTERVAL = timedelta(minutes=10)
+# After a command issued from Home Assistant (e.g. start mowing) the coordinator
+# keeps polling at the fast cadence for this long, so a command is reflected
+# quickly and the transition into a mowing state is caught even if the mower was
+# in the slow idle cadence and takes a few seconds to start.
+_COMMAND_ACTIVE_GRACE = 120.0  # seconds
+# If the shadow endpoint still rate-limits us (HTTP 429), back off exponentially
+# from this start, doubling each consecutive failure, capped at the max.
+_RATE_LIMIT_BACKOFF_START = timedelta(minutes=1)
+_RATE_LIMIT_BACKOFF_MAX = timedelta(minutes=30)
 _MOWING_STATES = {
     "globalmowing", "zonemowing", "pointmowing",
     "bordermowing", "regionmowing", "nestmowing",
@@ -245,6 +255,10 @@ class AnthbotGenieDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # never poll the shadow endpoint more often than once every 10 min.
         self._active_interval = update_interval
         self._idle_interval = max(update_interval, _IDLE_SCAN_INTERVAL)
+        # Monotonic deadline until which polling stays "active" after a command.
+        self._force_active_until = 0.0
+        # Current 429 back-off interval (None = not rate-limited).
+        self._rate_limit_backoff: timedelta | None = None
         self._area_definition: dict[str, Any] = {}
         self._last_area_time: str | None = None
         self._coverage_points: list[list[int]] = []
@@ -275,18 +289,25 @@ class AnthbotGenieDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except AnthbotGenieApiError:
                 service_state = {}
 
+            # We reached the endpoint successfully -> clear any 429 back-off.
+            self._rate_limit_backoff = None
+
             # Adaptive polling. The mower only streams live telemetry
             # (pose/curpath) to the shadow while a client signals an active app
             # session, and that only matters while it is actually mowing. So:
-            #  - mowing  -> keep the stream alive (app_state) and poll at the
-            #    configured fast cadence, exactly as before;
+            #  - mowing (or just after a command from HA, see the grace window)
+            #    -> keep the stream alive (app_state) and poll at the configured
+            #    fast cadence;
             #  - idle/docked -> send nothing and back off to the slow cadence
             #    (>= 10 min), which keeps us under the shadow endpoint's rate
             #    limit (it returns HTTP 429 TOO_MANY_REQUESTS under frequent polls).
             is_mowing = _raw_robot_status(property_state) in _MOWING_STATES
-            if is_mowing:
+            forced_active = time.monotonic() < self._force_active_until
+            active = is_mowing or forced_active
+            if active:
                 # Best-effort: never fail the update if the keep-alive command
-                # does not go through.
+                # does not go through. Sent during the post-command grace window
+                # too, to pre-warm the stream before mowing actually begins.
                 try:
                     await self.client.async_publish_service_command(
                         cmd="app_state", data=1
@@ -296,14 +317,15 @@ class AnthbotGenieDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "Real-time keep-alive (app_state) failed: %s", err
                     )
             desired_interval = (
-                self._active_interval if is_mowing else self._idle_interval
+                self._active_interval if active else self._idle_interval
             )
             if self.update_interval != desired_interval:
                 self.update_interval = desired_interval
                 self.logger.debug(
-                    "Anthbot poll interval -> %s (mowing=%s)",
+                    "Anthbot poll interval -> %s (mowing=%s, forced=%s)",
                     desired_interval,
                     is_mowing,
+                    forced_active,
                 )
 
             area_time = property_state.get("area_time")
@@ -341,7 +363,38 @@ class AnthbotGenieDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             return merged_state
         except AnthbotGenieApiError as err:
+            # If the shadow endpoint rate-limits us (HTTP 429), extend the poll
+            # interval exponentially so we stop hammering it; the next successful
+            # poll resets this back to the normal active/idle cadence.
+            if getattr(err, "status", None) == 429 or "TOO_MANY_REQUESTS" in str(err):
+                self._rate_limit_backoff = min(
+                    self._rate_limit_backoff * 2
+                    if self._rate_limit_backoff
+                    else _RATE_LIMIT_BACKOFF_START,
+                    _RATE_LIMIT_BACKOFF_MAX,
+                )
+                self.update_interval = self._rate_limit_backoff
+                self.logger.warning(
+                    "Anthbot shadow endpoint rate-limited (429); backing off "
+                    "to %s",
+                    self._rate_limit_backoff,
+                )
             raise UpdateFailed(str(err)) from err
+
+    async def async_kick_active_poll(self) -> None:
+        """Force fast ("active") polling briefly after a user command.
+
+        A command issued from Home Assistant (e.g. start mowing) should be
+        reflected quickly even if the mower was in the slow idle cadence, and we
+        must keep polling fast long enough to catch the transition into a mowing
+        state (the mower takes a few seconds to start). Opens a short grace
+        window during which :meth:`_async_update_data` treats the mower as
+        active, switches to the fast interval now, and requests an immediate
+        refresh.
+        """
+        self._force_active_until = time.monotonic() + _COMMAND_ACTIVE_GRACE
+        self.update_interval = self._active_interval
+        await self.async_request_refresh()
 
     def _accumulate_coverage(self, property_state: dict[str, Any]) -> None:
         """Accumulate the rolling ``curpath`` window into a growing coverage trail.

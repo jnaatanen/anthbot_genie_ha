@@ -35,7 +35,11 @@ active app session, and stops roughly 60 seconds after the last signal, so
 re-sending it keeps that data fresh without the phone app being open. While the
 mower is idle or docked there is no live telemetry to fetch, so the integration
 sends no keep-alive and backs off to a slow cadence (at least once every 10
-minutes).
+minutes). Issuing a command from Home Assistant (start mowing, a zone/auto-zone
+button, dock, stop, …) immediately switches back to the fast cadence for a short
+window so the result shows up without waiting for the slow poll. If the shadow
+endpoint still returns 429, the poll interval backs off exponentially (up to 30
+minutes) until a poll succeeds.
 
 It also fetches the mower area definition file from Anthbot cloud to discover:
 

@@ -166,7 +166,7 @@ class AnthbotLawnMowerEntity(
         """Refresh shadow state after issuing a command."""
         await self.coordinator.client.async_request_all_properties()
         await asyncio.sleep(1)
-        await self.coordinator.async_request_refresh()
+        await self.coordinator.async_kick_active_poll()
 
     async def async_start_mowing(self) -> None:
         """Start mowing."""

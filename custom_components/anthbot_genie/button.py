@@ -144,7 +144,7 @@ class AnthbotButtonEntity(
             )
         await self.coordinator.client.async_request_all_properties()
         await asyncio.sleep(1)
-        await self.coordinator.async_request_refresh()
+        await self.coordinator.async_kick_active_poll()
 
 
 class AnthbotZoneButtonEntity(
@@ -232,4 +232,4 @@ class AnthbotZoneButtonEntity(
             )
         await self.coordinator.client.async_request_all_properties()
         await asyncio.sleep(1)
-        await self.coordinator.async_request_refresh()
+        await self.coordinator.async_kick_active_poll()

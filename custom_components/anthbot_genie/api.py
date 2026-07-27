@@ -38,6 +38,10 @@ _LOGGER = logging.getLogger(__name__)
 class AnthbotGenieApiError(HomeAssistantError):
     """Raised when the Anthbot API request fails."""
 
+    def __init__(self, *args: Any, status: int | None = None) -> None:
+        super().__init__(*args)
+        self.status = status
+
 
 @dataclass(frozen=True, slots=True)
 class AnthbotBoundDevice:
@@ -763,7 +767,8 @@ class AnthbotShadowApiClient:
                     raise AnthbotGenieApiError(
                         f"Shadow request failed ({response.status}) at endpoint "
                         f"'{self._iot_endpoint}' (region '{self.signing_region}'): "
-                        f"{body[:300]}"
+                        f"{body[:300]}",
+                        status=response.status,
                     )
                 payload = await response.json(content_type=None)
         except ClientError as err:

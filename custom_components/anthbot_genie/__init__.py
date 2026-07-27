@@ -206,7 +206,7 @@ async def _async_register_services(hass: HomeAssistant) -> None:
     ) -> None:
         await coordinator.client.async_request_all_properties()
         await asyncio.sleep(1)
-        await coordinator.async_request_refresh()
+        await coordinator.async_kick_active_poll()
 
     base_schema = vol.Schema(
         {
